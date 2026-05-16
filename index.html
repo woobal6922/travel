@@ -368,6 +368,7 @@ input,select,textarea{font-family:"Noto Sans KR",sans-serif}
 </head>
 <body>
 <div id="app">
+<div id="sync-status" style="position:fixed;top:env(safe-area-inset-top,0);left:50%;transform:translateX(-50%);background:var(--mint);color:#fff;font-size:11px;padding:4px 14px;border-radius:0 0 10px 10px;z-index:9999;opacity:0;transition:opacity .4s;pointer-events:none;font-weight:600"></div>
 
 <!-- HOME -->
 <div class="sc" id="sc-home">
@@ -694,11 +695,89 @@ input,select,textarea{font-family:"Noto Sans KR",sans-serif}
 <div class="map-dropdown" id="map-dropdown"></div>
 </div>
 
-<script>
-// DATA
+<script type="module">
+// ══════════════════════════════════════════
+// FIREBASE SETUP
+// ══════════════════════════════════════════
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDMx0xoL_yKeMlNr5gdqD3e7wwElLSQ0gU",
+  authDomain: "travel-51c74.firebaseapp.com",
+  projectId: "travel-51c74",
+  storageBucket: "travel-51c74.firebasestorage.app",
+  messagingSenderId: "659444088534",
+  appId: "1:659444088534:web:5e7b85825e247710299377"
+};
+
+const fbApp = initializeApp(firebaseConfig);
+const firestore = getFirestore(fbApp);
+const DOC_ID = 'shared'; // 2인 공유 문서
+const DB_REF = doc(firestore, 'travel-journal', DOC_ID);
+
+// ── 동기화 상태 표시 ──
+function showSyncStatus(msg, color){
+  var el=document.getElementById('sync-status');
+  if(!el)return;
+  el.textContent=msg;
+  el.style.background=color||'var(--mint)';
+  el.style.opacity='1';
+  setTimeout(function(){el.style.opacity='0';},2000);
+}
+
+// ══════════════════════════════════════════
+// DATA — localStorage(로컬 캐시) + Firestore(클라우드)
+// ══════════════════════════════════════════
 var KEY='tj3';
 var db=function(){try{var d=JSON.parse(localStorage.getItem(KEY));return d&&d.v===3?d:{v:3,trips:[],photos:{},eid:0,pid:0};}catch(e){return {v:3,trips:[],photos:{},eid:0,pid:0};}}();
-function save(){try{localStorage.setItem(KEY,JSON.stringify(db));}catch(e){}}
+
+var _saving=false;
+async function save(){
+  // 로컬 먼저 저장
+  try{localStorage.setItem(KEY,JSON.stringify(db));}catch(e){}
+  // Firestore 동기화 (사진 제외 — 용량 문제)
+  try{
+    var payload={v:db.v,trips:db.trips,eid:db.eid,pid:db.pid,_t:Date.now()};
+    await setDoc(DB_REF, payload);
+    showSyncStatus('✓ 동기화됨','var(--mint)');
+  }catch(e){
+    showSyncStatus('⚠ 오프라인','var(--coral)');
+  }
+}
+
+// ── 실시간 수신: 상대방 변경사항 자동 반영 ──
+onSnapshot(DB_REF, function(snap){
+  if(!snap.exists()) return;
+  var remote=snap.data();
+  // 내가 저장한 것보다 새로운 데이터면 반영
+  if(remote._t && remote._t > (db._lastSync||0)){
+    db.trips=remote.trips||[];
+    db.eid=remote.eid||0;
+    db.pid=remote.pid||0;
+    db._lastSync=remote._t;
+    try{localStorage.setItem(KEY,JSON.stringify(db));}catch(e){}
+    // 현재 화면 갱신
+    if(typeof renderHome==="function") renderHome();
+    if(CT && typeof renderDetail==="function") renderDetail();
+    showSyncStatus('↓ 업데이트됨','var(--sky)');
+  }
+});
+
+// ── 초기 로드: Firestore → 로컬 병합 ──
+getDoc(DB_REF).then(function(snap){
+  if(snap.exists()){
+    var remote=snap.data();
+    if(remote._t && remote._t > (db._lastSync||0)){
+      db.trips=remote.trips||db.trips;
+      db.eid=remote.eid||db.eid;
+      db.pid=remote.pid||db.pid;
+      db._lastSync=remote._t;
+      try{localStorage.setItem(KEY,JSON.stringify(db));}catch(e){}
+      renderHome();
+    }
+  }
+}).catch(function(){});
 
 // FX
 var FX={KRW:1,USD:1450,EUR:1700,TRY:32,JPY:9.5,THB:42,GBP:1820,CNY:200,HKD:185,SGD:1080,MYR:320,VND:0.058,IDR:0.09,INR:17,AED:395,CHF:1650,SEK:135,NOK:135,DKK:210,PLN:380,CZK:65,HUF:4,RON:320,ISK:10,TWD:45,PHP:25,KHR:0.36,NPR:11,LKR:4.8,SAR:385,ILS:390,JOD:2040,EGP:30,MAD:145,ZAR:79,MXN:73,BRL:290,ARS:1.5,PEN:385,CLP:1.6,CAD:1060,AUD:950,NZD:870};
@@ -1275,26 +1354,6 @@ function renderPriceGuide(){
 
 
 
-function renderPlaces(){
-  if(!CT) return;
-  var places=CT.places||[];
-  setText('map-cnt','장소 '+places.length+'개');
-  var wrap=document.getElementById('place-list-wrap');
-  if(!wrap) return;
-  if(!places.length){
-    wrap.innerHTML='<div style="padding:12px 14px;font-size:11px;color:var(--muted);text-align:center">저장된 장소가 없습니다. 검색하거나 직접 추가하세요.</div>';
-    return;
-  }
-  wrap.innerHTML=places.map(function(p){
-    return '<div class="map-place-row" onclick="jumpMapById('+p.id+')">'
-      +'<span class="map-place-ico">'+p.cat.split(' ')[0]+'</span>'
-      +'<div style="flex:1;min-width:0"><div class="map-place-name">'+esc(p.name)+'</div>'
-      +(p.addr?'<div class="map-place-addr">'+esc(p.addr.substring(0,40))+'</div>':'')+'</div>'
-      +'<button class="map-place-goto" onclick="event.stopPropagation();openMapExt('+p.id+')" title="구글맵">🗺</button>'
-      +'<button class="map-place-del" onclick="event.stopPropagation();deletePlace('+p.id+')">×</button>'
-    +'</div>';
-  }).join('');
-}
 function initMapTab(){
   renderPlaces();
   // 기본 지도: 여행 나라 중심
@@ -1643,8 +1702,94 @@ function fmtC(a,c){var s={KRW:'₩',USD:'$',EUR:'€',TRY:'₺',JPY:'¥',THB:'�
 // PWA
 if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('./sw.js').catch(function(){});});}
 
+
+// ── window 노출 (module → HTML onclick 연결) ──
+window.addE=addE;
+window.addPhotos=addPhotos;
+window.back=back;
+window.buildCL=buildCL;
+window.calMv=calMv;
+window.catColor=catColor;
+window.closeDay=closeDay;
+window.closeDayCl=closeDayCl;
+window.closePO=closePO;
+window.confirm2=confirm2;
+window.confirmE=confirmE;
+window.cpClose=cpClose;
+window.delE=delE;
+window.delNote=delNote;
+window.delPhoto=delPhoto;
+window.deleteDayCl=deleteDayCl;
+window.deletePlace=deletePlace;
+window.deleteTripFn=deleteTripFn;
+window.dlgAlert=dlgAlert;
+window.dlgNo=dlgNo;
+window.dlgYes=dlgYes;
+window.doFx=doFx;
+window.editE=editE;
+window.editPlace=editPlace;
+window.editTripFn=editTripFn;
+window.fetchPlaces=fetchPlaces;
+window.filterC=filterC;
+window.goHome=goHome;
+window.goNew=goNew;
+window.goSettings=goSettings;
+window.initMapTab=initMapTab;
+window.jumpMap=jumpMap;
+window.jumpMapById=jumpMapById;
+window.neClose=neClose;
+window.onMapSearch=onMapSearch;
+window.openAddPlace=openAddPlace;
+window.openCP=openCP;
+window.openDayCl=openDayCl;
+window.openDetail=openDetail;
+window.openMap=openMap;
+window.openMapExt=openMapExt;
+window.openNE=openNE;
+window.openOpts=openOpts;
+window.openRoute=openRoute;
+window.optsClose=optsClose;
+window.pickC=pickC;
+window.pickColor=pickColor;
+window.pickSR=pickSR;
+window.renderBudget=renderBudget;
+window.renderCal=renderCal;
+window.renderDayCl=renderDayCl;
+window.renderDetail=renderDetail;
+window.renderExps=renderExps;
+window.renderHome=renderHome;
+window.renderNotes=renderNotes;
+window.renderPhotos=renderPhotos;
+window.renderPlaces=renderPlaces;
+window.renderPriceGuide=renderPriceGuide;
+window.resetForm=resetForm;
+window.saveDayCl=saveDayCl;
+window.saveNE=saveNE;
+window.saveNote=saveNote;
+window.savePN=savePN;
+window.savePlace=savePlace;
+window.selD=selD;
+window.setCatFilter=setCatFilter;
+window.setHTML=setHTML;
+window.setText=setText;
+window.show=show;
+window.showSyncStatus=showSyncStatus;
+window.submitTrip=submitTrip;
+window.swFx=swFx;
+window.swTab=swTab;
+window.swTabById=swTabById;
+window.tcHTML=tcHTML;
+window.toggleDayCl=toggleDayCl;
+window.toggleExpand=toggleExpand;
+window.toggleVisited=toggleVisited;
+window.updateMapIframe=updateMapIframe;
+window.viewPhoto=viewPhoto;
 // INIT
 renderHome();
+
+// Firebase 모듈에서 일반 함수 접근용 window 노출
+window._renderHome = renderHome;
+window._renderDetail = function(){ if(CT && typeof renderDetail==="function") renderDetail(); };
 </script>
 </body>
 </html>
